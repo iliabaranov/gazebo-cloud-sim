@@ -64,7 +64,13 @@ def generate_launch_description():
         executable='parameter_bridge',
         name='gz_bridge',
         output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            # lazy=True: bridge only subscribes to Gazebo when a ROS node is
+            # listening. Sensors with <always_on>false in the SDF will then
+            # also stop rendering when unsubscribed, saving CPU/GPU.
+            'lazy': True,
+        }],
         arguments=[
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
