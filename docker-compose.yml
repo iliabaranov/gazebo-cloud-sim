@@ -1,0 +1,29 @@
+services:
+
+  gazebo:
+    build: .
+    container_name: ros2_gazebo
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=:99
+      - ROS_DOMAIN_ID=0
+      - VGL_DISPLAY=/dev/dri/card0
+      - VGL_REFRESHRATE=60
+      - __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d/
+    devices:
+      - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    ports:
+      - "8080:8080"   # noVNC browser interface  -> http://<host-ip>:8080/vnc.html
+      - "5900:5900"   # Raw VNC (optional, for VNC clients)
+    volumes:
+      - ./worlds:/ros2_ws/worlds:ro
+      - ./src:/ros2_ws/src
+      - ./config:/ros2_ws/config:ro
+    stdin_open: true
+    tty: true
+    # Override CMD to load a specific world:
+    #   docker compose run gazebo vglrun ros2 launch ros_gz_sim gz_sim.launch.py \
+    #     gz_args:="-r --gui-config /ros2_ws/config/gz_gui.config /ros2_ws/worlds/demo.sdf"

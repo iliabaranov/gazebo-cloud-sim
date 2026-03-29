@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""
+health-monitor — Poll realtime factor for all running gz_ containers
+and restart any that are persistently unhealthy.
+
+What "unhealthy" means:
+  RTF < GZ_RTF_THRESHOLD (default 0.80) for GZ_RTF_FAILURES (default 3)
+  consecutive measurement rounds.
+
+Run in the foreground (logs to stdout):
+  python3 orchestrator/health-monitor
+
+Run in the background with log file:
+  nohup python3 orchestrator/health-monitor >> /var/log/gz-health.log 2>&1 &
+  echo $! > /var/run/gz-health.pid
+
+Stop a background run:
+  kill $(cat /var/run/gz-health.pid)
+"""
+
+import os
+import sys
+import signal
+import logging
+import time
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from gz_sim.manager import SimulatorManager
+from gz_sim.config import (
+    RTF_THRESHOLD,
+    RTF_POLL_INTERVAL,
+    RTF_FAILURES_TO_RESTART,
+    RTF_MEASURE_SECS,
+)
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("health-monitor")
+
+
+# ── Signal handling ────────────────────────────────────────────────────────────
+
+_shutdown = False
+
+def _handle_signal(sig, _frame):
+    global _shutdown
+    log.info(f"Received signal {sig}, shutting down…")
+    _shutdown = True
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT,  _handle_signal)
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def main():
+    log.info("=" * 60)
+    log.info("gz-sim health monitor starting")
+    log.info(f"  RTF threshold:    {RTF_THRESHOLD}")
+    log.info(f"  Measure window:   {RTF_MEASURE_SECS}s per instance")
+    log.info(f"  Poll interval:    {RTF_POLL_INTERVAL}s between rounds")
+    log.info(f"  Failures→restart: {RTF_FAILURES_TO_RESTART} consecutive")
+    log.info("=" * 60)
+
+    try:
+        mgr = SimulatorManager()
+    except RuntimeError as e:
+        log.error(f"Cannot connect to Docker: {e}")
+        sys.exit(1)
+
+    # failure_counts[instance_id] = consecutive rounds below threshold
+    failure_counts: dict[int, int] = defaultdict(int)
+    total_restarts = 0
+    round_num = 0
+
+    while not _shutdown:
+        round_num += 1
+        instances = mgr.list_instances()
+        running   = [i for i in instances if i.is_running]
+
+        if not running:
+            log.info(f"[round {round_num}] No instances running.")
+        else:
+            log.info(
+                f"[round {round_num}] Checking {len(running)} instance(s) "
+                f"(~{RTF_MEASURE_SECS}s per instance, parallel)…"
+            )
+
+            rtf_map = mgr.get_rtf_parallel([i.id for i in running])
+
+            for inst in running:
+                rtf = rtf_map.get(inst.id)
+
+                if rtf is None:
+                    # Measurement failed — container may still be starting up
+                    log.warning(
+                        f"  {inst.name}: RTF measurement failed "
+                        f"(starting up, or /stats not yet published)"
+                    )
+                    # Don't count a measurement failure as a health failure
+                    continue
+
+                if rtf < RTF_THRESHOLD:
+                    failure_counts[inst.id] += 1
+                    log.warning(
+                        f"  {inst.name}: RTF={rtf:.4f}  [BELOW {RTF_THRESHOLD}]  "
+                        f"({failure_counts[inst.id]}/{RTF_FAILURES_TO_RESTART} consecutive)"
+                    )
+
+                    if failure_counts[inst.id] >= RTF_FAILURES_TO_RESTART:
+                        log.error(
+                            f"  {inst.name}: restarting after "
+                            f"{failure_counts[inst.id]} unhealthy rounds"
+                        )
+                        try:
+                            mgr.restart(inst.id)
+                            total_restarts += 1
+                            failure_counts[inst.id] = 0
+                            log.info(f"  {inst.name}: restart complete")
+                        except Exception as exc:
+                            log.error(f"  {inst.name}: restart failed — {exc}")
+                else:
+                    if failure_counts[inst.id] > 0:
+                        log.info(
+                            f"  {inst.name}: RTF={rtf:.4f}  [recovered]  "
+                            f"(resetting failure count)"
+                        )
+                        failure_counts[inst.id] = 0
+                    else:
+                        log.info(f"  {inst.name}: RTF={rtf:.4f}  OK")
+
+        # Clean up failure counts for instances that no longer exist
+        running_ids = {i.id for i in running}
+        stale = [iid for iid in failure_counts if iid not in running_ids]
+        for iid in stale:
+            del failure_counts[iid]
+
+        log.info(
+            f"[round {round_num}] Done. "
+            f"Total restarts this session: {total_restarts}. "
+            f"Sleeping {RTF_POLL_INTERVAL}s…"
+        )
+
+        # Sleep in short increments so SIGTERM is handled promptly
+        for _ in range(RTF_POLL_INTERVAL):
+            if _shutdown:
+                break
+            time.sleep(1)
+
+    log.info(
+        f"Health monitor stopped. "
+        f"Total restarts performed: {total_restarts}"
+    )
+
+
+if __name__ == "__main__":
+    main()
