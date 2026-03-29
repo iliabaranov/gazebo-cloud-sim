@@ -53,14 +53,76 @@ bash scripts/stop.sh
 
 ---
 
-## Port Layout
+## Orchestrator — `gz-sim` CLI
 
-Each instance `N` (1-based) uses:
+The orchestrator manages container lifecycle, health monitoring, and persistent volumes. Install it once after building the image:
 
-| Service | Port |
-|---|---|
-| noVNC (browser) | `8079 + N` → 8080, 8081, 8082 … |
-| Raw VNC | `5899 + N` → 5900, 5901, 5902 … |
+```bash
+sudo bash orchestrator/install.sh   # installs gz-sim and gz-sim-health to /usr/local/bin
+```
+
+### Common commands
+
+```bash
+# Show all running instances (CPU, RAM, URLs)
+gz-sim status
+
+# Show status + measure realtime factor (~6s, runs in parallel)
+gz-sim status --rtf
+
+# Start 3 new instances (uses lowest available IDs)
+gz-sim start --n 3
+
+# Stop one instance (volume is preserved)
+gz-sim stop 2
+
+# Stop all instances
+gz-sim stop all
+
+# Scale to exactly N running instances (starts or stops as needed)
+gz-sim scale 5
+
+# Restart one instance (keeps its persistent volume)
+gz-sim restart 1
+
+# Wipe an instance's volume and restart from image defaults
+gz-sim reset 1
+
+# Stream logs from an instance
+gz-sim logs 1
+
+# Open a bash shell inside an instance (ROS2 env pre-sourced)
+gz-sim shell 1
+
+# List all persistent data volumes
+gz-sim volumes
+```
+
+### Health monitor
+
+Polls the realtime factor of every running instance every 30s and automatically restarts any that fall below RTF 0.80 for 3 consecutive rounds:
+
+```bash
+# Run in the background
+nohup gz-sim-health >> /tmp/gz-health.log 2>&1 &
+echo $! > /tmp/gz-health.pid
+
+# Follow logs
+tail -f /tmp/gz-health.log
+
+# Stop
+kill $(cat /tmp/gz-health.pid)
+```
+
+### Connecting to instances
+
+Each instance `N` (1-based) exposes:
+
+| Service | Host port | How to connect |
+|---|---|---|
+| noVNC (browser) | `8079 + N` → 8080, 8081 … | `http://<host>:8080/vnc.html?autoconnect=true&resize=scale` |
+| Raw VNC | `5899 + N` → 5900, 5901 … | Any VNC client |
+| Foxglove / rosbridge | `8089 + N` → 8090, 8091 … | Foxglove Studio → **ROS Bridge WebSocket** → `ws://<host>:8090` |
 
 Instances are isolated via `ROS_DOMAIN_ID=N` and `GZ_PARTITION=sim_N`.
 
@@ -112,27 +174,41 @@ but renders a black screen due to incompatible transport. `entrypoint.sh` handle
 ## Files
 
 ```
-ros2-gazebo/
-├── README.md                   ← you are here
+gazebo-cloud-sim/
 ├── Dockerfile                  ← container image definition
 ├── docker-compose.yml          ← single-instance compose config
 ├── entrypoint.sh               ← container startup (VNC, Gazebo, ROS2)
 ├── config/
 │   └── gz_gui.config           ← Gazebo GUI layout (1920×1080 fullscreen)
+├── orchestrator/
+│   ├── gz-sim                  ← CLI entry point (installed to PATH)
+│   ├── health-monitor          ← RTF daemon (installed as gz-sim-health)
+│   ├── install.sh              ← installs CLI + deps, symlinks to /usr/local/bin
+│   ├── requirements.txt        ← Python deps (docker, click, rich)
+│   └── gz_sim/
+│       ├── config.py           ← ports, limits, thresholds (env-overridable)
+│       ├── manager.py          ← SimulatorManager — all Docker logic
+│       └── models.py           ← Instance dataclass
 ├── scripts/
 │   ├── setup-host.sh           ← install NVIDIA driver, Docker, NVIDIA Container Toolkit
-│   ├── run.sh                  ← start N containers
+│   ├── run.sh                  ← start N containers (simple, no orchestrator)
 │   ├── stop.sh                 ← stop and remove all gz_ containers
 │   ├── verify.sh               ← check sensors, RTF, take screenshot
 │   └── capacity-test.sh        ← ramp up instances, measure limits
-└── src/
-    └── tb3_sim/                ← ROS2 package (built into image at build time)
-        ├── launch/tb3_nav2.launch.py
-        ├── worlds/tb3_world.sdf
-        ├── urdf/turtlebot3_burger.urdf
-        ├── maps/tb3_world.{pgm,yaml}
-        ├── params/nav2_params.yaml
-        └── tb3_sim/random_goal_sender.py
+├── src/
+│   └── tb3_sim/                ← ROS2 package (built into image at build time)
+│       ├── launch/tb3_nav2.launch.py
+│       ├── worlds/tb3_world.sdf
+│       ├── urdf/turtlebot3_burger.urdf
+│       ├── maps/tb3_world.{pgm,yaml}
+│       ├── params/nav2_params.yaml
+│       └── tb3_sim/random_goal_sender.py
+└── docs/                       ← full codebase in markdown (for system transport)
+    ├── 00-index.md
+    ├── 01-infrastructure.md
+    ├── 02-ros2-package.md
+    ├── 03-scripts.md
+    └── 04-orchestrator.md
 ```
 
 ---
